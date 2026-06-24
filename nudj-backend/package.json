@@ -1,0 +1,29 @@
+{
+  "name": "nudj-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env --import tsx/esm --watch src/index.ts",
+    "start": "node --env-file=.env --import tsx/esm src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^1.50.1",
+    "@hono/node-server": "^1",
+    "@supabase/supabase-js": "^2",
+    "googleapis": "^140",
+    "hono": "^4",
+    "node-cron": "^3",
+    "openai": "^6.35.0",
+    "pdf-parse": "^1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/node-cron": "^3",
+    "@types/pdf-parse": "^1",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
