@@ -6,8 +6,10 @@ title: Implementation Plan
 # Implementation Plan — Nudj MVP
 
 **Target:** Working WhatsApp bot in 6 weeks
-**Stack:** TypeScript (Hono) · Supabase · Gemini Flash · WhatsApp Cloud API · Gmail OAuth
+**Stack:** TypeScript (Hono) · Supabase · OpenRouter Llama 3.3 70B (free tier) · WhatsApp Cloud API · Gmail OAuth
 **Infra cost:** ~₹0/month until scale
+
+**Status:** Weeks 1–3 ✅ built · Week 4–5 partially built (mandate detection + keyword queries done; cron alerts + digests pending) · see [Architecture & End-to-End Flow](./architecture.md) for the system as implemented
 
 ---
 
@@ -158,7 +160,7 @@ create table parsed_emails (
 
 ---
 
-### Week 2 — Gmail OAuth + Email Ingestion (Multi-account)
+### Week 2 — Gmail OAuth + Email Ingestion (Multi-account) ✅
 
 **Goal:** User connects one or more Gmail accounts; bot fetches and parses relevant emails from all of them.
 
@@ -238,33 +240,30 @@ const GMAIL_QUERIES = [
 
 Fetch last 6 months, page through all results (max 500 per query).
 
-#### 2.4 Gemini Extraction Prompt
+#### 2.4 Extraction — Regex First, AI Refinement Only When Needed
 
-```typescript
-const EXTRACTION_PROMPT = `
-Extract structured data from this bank/merchant email. Return JSON only, no explanation.
+Every email goes through a free code path first; the LLM sees only the minority that regex can't handle:
 
-Fields:
-- type: one of [pre_debit_notification, mandate_created, transaction_debit, subscription_receipt, sip_confirmation, unknown]
-- merchant: string (e.g. "Netflix", "HDFC Bank")
-- amount: number or null
-- currency: "INR"
-- execution_date: "YYYY-MM-DD" or null
-- account_last4: string or null
-- bank: string or null
-- frequency: one of [monthly, quarterly, annual, one_time] or null
-- status: one of [upcoming, completed, cancelled] or null
-
-Email:
-${emailBody}
-`
+```
+extractBody()          — walk nested multiparts, strip HTML → plain text (no API)
+        ↓
+extractWithRegex()     — type, merchant, amount, date, account, bank,
+                         frequency, status via curated patterns (no API)
+        ↓
+confident? (type known + amount found) → store. ZERO tokens.
+        ↓ (only low-confidence results)
+refineWithAi()         — body capped at 1,800 chars, regex fields backfill
+                         any nulls the model returns; AI failure keeps the
+                         regex result so the pipeline never blocks
 ```
 
-Emails are extracted using regex (no LLM) — zero API cost, instant processing. Store results in `parsed_emails`, upsert into `transactions` / `subscriptions`.
+Fields extracted: `type` (pre_debit_notification | mandate_created | transaction_debit | subscription_receipt | sip_confirmation | unknown), `merchant`, `amount`, `currency`, `execution_date`, `account_last4`, `bank`, `frequency`, `status`.
+
+Results are stored in `parsed_emails` (deduped by `gmail_message_id`), upserted into `transactions` / `subscriptions`.
 
 ---
 
-### Week 3 — PDF Bank Statement Parsing (Password-protected support)
+### Week 3 — PDF Bank Statement Parsing (Password-protected support) ✅
 
 **Goal:** User uploads a PDF (including password-protected ones), bot parses 3–12 months of transactions.
 
@@ -314,45 +313,36 @@ async function extractTextFromPdf(buffer: Buffer): Promise<string> {
 }
 ```
 
-#### 3.3 Bank Detection + Gemini Extraction
+#### 3.3 Code-First Statement Parsing (`statementParser.ts`)
 
-Detect bank from the first ~500 chars of text (look for "HDFC", "ICICI State Bank", etc.), then send raw text to Gemini with a structured prompt:
+Detect bank from the first ~500 chars, then parse transaction rows **deterministically in code** — the LLM never sees the raw statement text:
 
-```typescript
-const PDF_EXTRACTION_PROMPT = `
-You are parsing an Indian bank statement. Extract all transactions as a JSON array.
+- Date-led rows in Indian formats: `01/04/25`, `1 Apr 2025`, and ICICI's serial-number-glued `103.03.2026` (serial `1` + `03.03.2026`)
+- Indian comma-grouped amounts, including ICICI's glued amount+balance runs (`1000.0080939.44` → `1000.00` + `80939.44`)
+- Debit/credit inferred from running-balance deltas (definitive), falling back to Cr markers and keywords
+- UPI reference-ID noise stripped from descriptions
 
-Each transaction:
-{
-  "date": "YYYY-MM-DD",
-  "description": "string",
-  "amount": number,
-  "type": "debit" | "credit",
-  "balance": number | null
-}
+If code parsing finds fewer than 5 rows (unrecognized layout), the pipeline falls back to the old full-text LLM parse (~10–20x the tokens).
 
-Return only the JSON array, no explanation.
+#### 3.4 Categorization — Local Rules, Then TOON AI Enrichment
 
-Statement text:
-${pdfText}
-`
+1. ~40 keyword rules categorize known merchants for free (Swiggy→food, Netflix→subscriptions, NACH/SIP→sip, Airtel→utilities, …)
+2. Only **unique, uncategorized** descriptions go to the LLM, encoded in TOON format (~40–60% fewer tokens than JSON):
+
+```
+descriptions[2]{id,text}:
+  0,UPI/NIVEDITA K/neetukher
+  1,VISA trxn VPS/OLIVA CHENNAI
 ```
 
-> Note: This relies entirely on Gemini for structure — no column mapping needed per bank.
-> Trade-off vs pdfplumber: slightly more LLM cost (~₹0.10/PDF), but zero maintenance across bank formats.
+The model returns `[{id, merchant, category}]`, applied back to every matching row. On AI failure rows default to `other` — the pipeline never blocks.
 
-#### 3.4 Transaction Categorization
+3. Recurring mandates are detected **in code** (`detectMandates`): same merchant, amount within 5%, date gaps 25–35d = monthly (also weekly/quarterly/yearly bands).
 
-Send all descriptions to Gemini in one batch call:
+**Measured savings:** a 19-page ICICI statement is ~11,300 tokens raw; the code-first path sends only a few hundred TOON tokens (zero when all merchants match local rules). Test any statement with:
 
-```typescript
-const CATEGORIZE_PROMPT = `
-Categorize each transaction. Return a JSON array of category strings in the same order.
-Categories: food, travel, subscriptions, emi, sip, utilities, transfer, other
-
-Transactions:
-${JSON.stringify(descriptions)}
-`
+```bash
+npx tsx src/scripts/debugPdf.ts <statement.pdf> [password]
 ```
 
 ---
@@ -554,15 +544,22 @@ List messages: GET /gmail/v1/users/me/messages?q={query}
 Get message:   GET /gmail/v1/users/me/messages/{id}?format=full
 ```
 
-### Gemini Flash
+### LLM — OpenRouter (free tier)
 
 ```typescript
-import { GoogleGenerativeAI } from '@google/generative-ai'
+// src/services/gemini.ts (naming holdover — actually OpenRouter)
+import OpenAI from 'openai'
 
-const genai = new GoogleGenerativeAI(config.GEMINI_API_KEY)
-const model = genai.getGenerativeModel({ model: 'gemini-2.0-flash' })
-const result = await model.generateContent(prompt)
-const text = result.response.text()
+const client = new OpenAI({
+  baseURL: 'https://openrouter.ai/api/v1',
+  apiKey: config.OPENROUTER_API_KEY,
+})
+
+const completion = await client.chat.completions.create({
+  model: 'meta-llama/llama-3.3-70b-instruct:free',
+  messages: [{ role: 'user', content: prompt }],
+  temperature: 0,
+})
 ```
 
 ---
@@ -580,8 +577,8 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=https://yourdomain/oauth/callback
 
-# Gemini
-GEMINI_API_KEY=
+# LLM (OpenRouter free tier)
+OPENROUTER_API_KEY=
 
 # Supabase
 SUPABASE_URL=
@@ -606,7 +603,8 @@ PORT=3000
     "@hono/node-server": "^1",
     "@supabase/supabase-js": "^2",
     "googleapis": "^140",
-    "@google/generative-ai": "^0.21",
+    "openai": "^6",
+    "@google/genai": "^1",
     "pdf-parse": "^1",
     "node-cron": "^3"
   },

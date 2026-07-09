@@ -1,6 +1,7 @@
 import { google } from 'googleapis'
 import { config } from '../config.js'
 import { decrypt } from '../utils/crypto.js'
+import { generate, parseJson } from './gemini.js'
 import { storeParsedEmail, getGmailAccounts } from '../db/queries.js'
 
 const GMAIL_QUERIES = [
@@ -110,29 +111,69 @@ async function processOneEmail(
   if (!body.trim()) return
 
   const subject = res.data.payload?.headers?.find((h) => h.name?.toLowerCase() === 'subject')?.value ?? ''
-  const extracted = extractWithRegex(body, subject)
+
+  // Code-first: regex extraction is free. AI only refines low-confidence results,
+  // and only sees a trimmed plain-text body — most emails never touch the LLM.
+  let extracted = extractWithRegex(body, subject)
+  if (!isConfident(extracted)) {
+    try {
+      extracted = await refineWithAi(subject, body, extracted)
+    } catch (err) {
+      console.error(`[gmail] AI refinement failed for ${messageId}, keeping regex result:`, err instanceof Error ? err.message : err)
+    }
+  }
+
   await storeParsedEmail(userId, messageId, extracted.type ?? 'unknown', extracted)
 }
 
-function extractBody(message: { payload?: { body?: { data?: string | null }; parts?: Array<{ mimeType?: string | null; body?: { data?: string | null } }> | null } | null }): string {
+interface GmailPart {
+  mimeType?: string | null
+  body?: { data?: string | null } | null
+  parts?: GmailPart[] | null
+}
+
+function collectParts(part: GmailPart, out: GmailPart[]): void {
+  out.push(part)
+  for (const p of part.parts ?? []) collectParts(p, out)
+}
+
+function extractBody(message: { payload?: GmailPart | null }): string {
   const payload = message.payload
   if (!payload) return ''
 
-  // Single-part message
-  if (payload.body?.data) {
-    return Buffer.from(payload.body.data, 'base64url').toString('utf8')
+  // Walk nested multiparts (multipart/alternative inside multipart/mixed etc.)
+  const all: GmailPart[] = []
+  collectParts(payload, all)
+
+  const plain = all.find((p) => p.mimeType === 'text/plain' && p.body?.data)
+  if (plain?.body?.data) {
+    return Buffer.from(plain.body.data, 'base64url').toString('utf8')
   }
 
-  // Multi-part — prefer text/plain, fall back to text/html
-  const parts = payload.parts ?? []
-  const plain = parts.find((p) => p.mimeType === 'text/plain')
-  const html = parts.find((p) => p.mimeType === 'text/html')
-  const part = plain ?? html
-  if (part?.body?.data) {
-    return Buffer.from(part.body.data, 'base64url').toString('utf8')
+  const html = all.find((p) => p.mimeType === 'text/html' && p.body?.data)
+  if (html?.body?.data) {
+    return stripHtml(Buffer.from(html.body.data, 'base64url').toString('utf8'))
+  }
+
+  if (payload.body?.data) {
+    const raw = Buffer.from(payload.body.data, 'base64url').toString('utf8')
+    return raw.trimStart().startsWith('<') ? stripHtml(raw) : raw
   }
 
   return ''
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#8377;|&#x20b9;/gi, '₹')
+    .replace(/&[a-z#0-9]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 interface ExtractedEmail extends Record<string, unknown> {
@@ -246,4 +287,41 @@ function extractWithRegex(emailBody: string, subject: string = ''): ExtractedEma
   else if (text.match(/cancelled|failed|reversed/)) status = 'cancelled'
 
   return { type, merchant, amount, currency: 'INR', execution_date, account_last4, bank, frequency, status }
+}
+
+// Regex result is good enough to skip the LLM entirely
+function isConfident(e: ExtractedEmail): boolean {
+  if (e.type === 'unknown') return false
+  if (e.amount === null && e.type !== 'mandate_created') return false
+  return true
+}
+
+// AI pass for the emails regex couldn't handle. Body is capped so a huge
+// newsletter can't blow the token budget; regex fields fill any nulls the
+// model returns.
+async function refineWithAi(
+  subject: string,
+  body: string,
+  regexResult: ExtractedEmail,
+): Promise<ExtractedEmail> {
+  const prompt = `Extract payment data from this Indian bank/merchant email. A regex pass already found: ${JSON.stringify(regexResult)} — correct it and fill in what it missed.
+
+Return only JSON:
+{"type": "pre_debit_notification"|"mandate_created"|"transaction_debit"|"subscription_receipt"|"sip_confirmation"|"unknown", "merchant": string|null, "amount": number|null, "execution_date": "YYYY-MM-DD"|null, "account_last4": string|null, "bank": string|null, "frequency": "monthly"|"quarterly"|"annual"|null, "status": "upcoming"|"completed"|"cancelled"|null}
+
+Subject: ${subject}
+Body: ${body.slice(0, 1800)}`
+
+  const refined = parseJson<Partial<ExtractedEmail>>(await generate(prompt))
+  return {
+    type: refined.type ?? regexResult.type,
+    merchant: refined.merchant ?? regexResult.merchant,
+    amount: typeof refined.amount === 'number' ? refined.amount : regexResult.amount,
+    currency: 'INR',
+    execution_date: refined.execution_date ?? regexResult.execution_date,
+    account_last4: refined.account_last4 ?? regexResult.account_last4,
+    bank: refined.bank ?? regexResult.bank,
+    frequency: refined.frequency ?? regexResult.frequency,
+    status: refined.status ?? regexResult.status,
+  }
 }
