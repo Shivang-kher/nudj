@@ -3,7 +3,9 @@
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["jest"],
+    "types": [
+      "jest"
+    ],
     "paths": {
       "@/*": [
         "./src/*"
@@ -12,7 +14,6 @@
   },
   "include": [
     "**/*.ts",
-    "**/*.tsx",
-    ".expo/types/**/*.ts"
+    "**/*.tsx"
   ]
 }
