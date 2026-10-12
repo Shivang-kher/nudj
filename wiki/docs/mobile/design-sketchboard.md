@@ -131,8 +131,10 @@ Gmail *is* the mandate data source, so one Google consent grants identity and ma
 together — the user is never asked to "connect Gmail" as a second step, which removes a drop-off
 point. The "Why Nudj asks for Gmail" card exists because **Google requires an in-app
 justification before its own consent screen** for restricted scopes; designing it into sign-in is
-part of passing that review. Phone sign-in stays second: it serves WhatsApp-only users and is the
-non-third-party login App Store Guideline 4.8 wants alongside Google.
+part of passing that review. **Updated 2026-10-13:** the second button is now *"Use email instead"*, not phone. SMS OTP in
+India needs DLT registration plus a paid provider; email OTP is free, instant and native to
+Supabase, and still satisfies App Store Guideline 4.8. The WhatsApp number is linked after
+sign-in instead, verified over the WhatsApp channel we already run.
 
 **4. The refusal is a designed state, not an error.**
 The Assist artboards deliberately show both halves — a real answer *and* a blocked prompt

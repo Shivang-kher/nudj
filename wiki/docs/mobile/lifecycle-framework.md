@@ -63,6 +63,7 @@ So:
 | 1 | [Dev Setup & Live Reload](./dev-setup.md) | In review |
 | 2 | [Tech Spec](./tech-spec.md) | Approved |
 | 3 | [Pseudocode — M0](./pseudocode-m0.md) | ✅ Built & verified |
+| 3 | [Pseudocode — M1](./pseudocode-m1.md) | In review |
 | 5 | Review & Compliance Log | Not started |
 | 6 | Test Plan | Not started |
 | — | [React Native Concepts](../react-native-concepts.md) | Living |
