@@ -1,0 +1,8 @@
+{
+  "label": "Mobile App (v1.0)",
+  "position": 7,
+  "link": {
+    "type": "generated-index",
+    "description": "The React Native build of Nudj — lifecycle framework, implementation plan, tech spec, pseudocode, reviews and test plans."
+  }
+}
