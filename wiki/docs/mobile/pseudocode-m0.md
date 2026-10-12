@@ -5,7 +5,7 @@ title: Pseudocode — M0
 
 # Pseudocode — M0: Foundations
 
-**Lifecycle step:** 3 of 7 · **Model:** Opus 5 · **Date:** 2026-10-12 · **Status:** Awaiting approval
+**Lifecycle step:** 3 of 7 · **Model:** Opus 5 · **Date:** 2026-10-12 · **Status:** ✅ Built and verified 2026-10-13
 
 > M0 in one sentence: **get a real app onto your phone, in Nudj's colours, with five tabs that
 > navigate.** No features, no backend calls, no data.
@@ -377,3 +377,31 @@ For every future milestone: **re-check the scaffold at execution time, not at sp
   value is that it is small enough to debug.
 - If `tsc` is still red after Task 1, find the remaining template file and delete it rather than
   adding a `.d.ts` shim to silence it.
+
+
+---
+
+## Result — M0 complete, 2026-10-13
+
+All seven exit checks pass on both platforms.
+
+| Check | Result |
+|---|---|
+| Launches from the dev client, no white flash | ✅ iOS Simulator + physical Android |
+| Five tabs navigate, active tab Nudj green | ✅ |
+| Dark mode flips the whole UI | ✅ card swaps shadow → border as designed |
+| Card reads `₹8,42,160`, commas at 2,2,3 | ✅ both platforms |
+| `Intl grouping:` line | **`native` on both** — see below |
+| `npx tsc --noEmit` | ✅ 0 errors |
+| `npx jest` | ✅ 10/10 |
+
+**The `Intl` question is settled: native on both.** Hermes ships usable `en-IN` ICU data on
+SDK 57. The fallback stays as insurance — it is free, tested, and guards against a trimmed-ICU
+device we do not own.
+
+Three further corrections came out of execution, all folded back into this doc: the template no
+longer ships a `(tabs)` group, `newArchEnabled` is gone from SDK 57's schema, and `@types/jest`
+plus `types: ["jest"]` are needed for the doc's own tests to typecheck. A fourth was found at
+build time: **`expo-dev-client` must be installed**, or `eas build --profile development`
+refuses to run. And `eas init` cannot write to a TypeScript config — it creates the project,
+errors, and leaves you to paste `extra.eas.projectId` in by hand.

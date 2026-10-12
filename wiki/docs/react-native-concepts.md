@@ -393,8 +393,15 @@ RN version and platform, full ICU data may not be bundled, and `toLocaleString` 
 silently fall back to en-US grouping — which produces a *plausible but wrong* number, the
 worst kind of bug in a finance app.
 
-**The rule for this project: verify currency formatting on a real device on both platforms
-in M0, and if it is wrong, write the grouping by hand.** Never assume.
+**Verified in M0 on 2026-10-13: both platforms report `native`.** iOS Simulator (iOS 26.5) and
+a physical Android phone both format `en-IN` correctly, so Hermes ships usable ICU data on
+current SDK 57 builds.
+
+The hand-written fallback in `src/lib/money.ts` **stays anyway**. It costs nothing, it is
+unit-tested, and it protects against a device or OS build with trimmed ICU data — which is
+exactly the kind of thing you discover from a user, not from your own two devices. The smoke
+card's `Intl grouping: native | fallback` line stays in the app through M1 so the answer keeps
+being visible rather than assumed.
 
 Also: use `fontVariant: ['tabular-nums']` wherever amounts stack in a column, so the digits
 line up.
