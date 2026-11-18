@@ -18,7 +18,7 @@ Built against: [Tech Spec](./tech-spec.md) §3 · [Design Sketchboard](./design-
 
 ---
 
-## Four findings that change M1
+## Five findings that change M1
 
 ### 1. Multi-account Gmail is broken in production right now
 
@@ -102,9 +102,36 @@ M1 is built knowing about them; M1 does not fix them. The single exception is th
 which M1 genuinely cannot work around.
 :::
 
+### 5. There is no JWT secret to copy — this project signs with ECC
+
+Checked in the dashboard on 2026-11-18. Supabase → Settings → JWT Keys shows:
+
+| Key | Type | |
+|---|---|---|
+| Current | **ECC (P-256)** | created ~7 months ago |
+| Previous | HS256 (Shared Secret) | rotated out ~7 months ago |
+
+Rev 1 and rev 2 both said to copy a `SUPABASE_JWT_SECRET` and verify with HS256. That is wrong
+for this project. HS256 uses one shared secret to both sign and verify, so you copy it. ECC signs
+with a private key that **stays at Supabase** and verifies with the matching public key, published
+at a well-known URL:
+
+```
+https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json
+```
+
+So there is **nothing to copy and no secret to leak** — strictly better than what was specced.
+`jose` fetches and caches the key set and picks up rotations by itself. Task 3.
+
+:::note Also noticed: legacy API keys retire in early 2027
+`SUPABASE_SERVICE_KEY` is the old JWT-shaped `service_role` key. The dashboard now issues
+`sb_publishable_…` and `sb_secret_…` instead and warns the legacy pair will be retired. It keeps
+working until then. Migrate in M6, alongside Google verification and real SMTP — not in M1.
+:::
+
 ---
 
-## Setup — status as of 2026-11-16
+## Setup — status as of 2026-11-18
 
 Three of rev 1's four console tasks are **done**. Two were dropped with the native clients.
 
@@ -118,7 +145,8 @@ Three of rev 1's four console tasks are **done**. Two were dropped with the nati
 | Supabase → OTP length 8 → **6** | **done** — sketchboard shows 6 boxes |
 | Supabase → OTP expiry 3600s → **600s** | **done** |
 | Supabase → template sends `{{ .Token }}`, not a link | **done** |
-| Supabase → anon key + JWT secret into `.env` | **outstanding, yours** |
+| Supabase → publishable key into `nudj-mobile/.env` | **done** — 2026-11-18 |
+| Supabase → JWT secret into backend `.env` | **dropped** — finding 5 |
 
 The saved template:
 
@@ -142,8 +170,8 @@ New env vars:
 
 ```
 # nudj-backend/.env
-SUPABASE_JWT_SECRET=...
 APP_REDIRECT_SCHEME=nudj
+# No SUPABASE_JWT_SECRET — see finding 5. Verification needs no secret.
 # GOOGLE_CLIENT_ID / _SECRET / _REDIRECT_URI already exist and are unchanged
 
 # nudj-mobile/.env
@@ -288,7 +316,10 @@ reconnect, and the fix should say so plainly rather than quietly re-prompting.
 
 ```
 FILE src/api/middleware/auth.ts
-  verify the Supabase JWT with jose, HS256, SUPABASE_JWT_SECRET
+  // ES256 against Supabase's public keys — NOT a shared secret. Finding 5.
+  JWKS = jose.createRemoteJWKSet(new URL(
+           `${SUPABASE_URL}/auth/v1/.well-known/jwks.json`))   // jose caches + refetches
+  claims = await jose.jwtVerify(token, JWKS, { algorithms: ['ES256'] })
   ON failure -> 401 { error: { code: 'unauthenticated' } }
   ON success -> resolveIdentity(claims)  (Task 4)  -> c.set('user', row)
 
@@ -569,6 +600,8 @@ BACKEND (vitest or node:test, against local Postgres)
             4 phone hit · 5 fresh create · 6 conflicting unique -> IdentityConflict
             7 concurrent sign-in of the same user -> one row, not two
   jwt middleware: valid · expired · wrong signature · missing -> 401
+                  · token signed with the retired HS256 key -> 401, not accepted
+                  · JWKS endpoint unreachable -> 503, never "allow through"
   link-whatsapp: happy · wrong code · expired · 6th attempt blocked
                  · number owned by another user -> 409
   google handoff: happy · replayed code -> 410 · expired code -> 410
