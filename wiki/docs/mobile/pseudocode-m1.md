@@ -93,9 +93,33 @@ Both verified in the console on 2026-11-16. Neither blocks M1. Both block shippi
   assessment. Deliberately left alone — that is a decision with a budget and a calendar attached,
   not a checkbox.
 
-**`GOOGLE_REDIRECT_URI` is a free ngrok tunnel** (`…ngrok-free.dev`). The hostname changes on
-every restart and Google matches redirect URIs exactly. Survivable for a bot only you test; not
-survivable for a phone app. Task 0.
+**`GOOGLE_REDIRECT_URI` is a free ngrok tunnel** (`…ngrok-free.dev`) — but **not** for the reason
+rev 2 gave.
+
+Corrected 2026-11-18. Rev 2 claimed the hostname rotates on every restart. It does not: ngrok's
+free tier now includes **one permanent static domain per account**, and plain `ngrok http 8000`
+assigns it with no flag. Verified by running it — the agent logged
+`url=https://smirk-storable-yearling.ngrok-free.dev`, identical to `BASE_URL`.
+
+The actual blocker is the free tier's **browser interstitial**. Verified with the backend stopped:
+
+```
+GET https://…ngrok-free.dev/oauth/callback?code=test&state=test
+  with a normal Chrome User-Agent and Accept: text/html
+-> 200, 2813 bytes of ngrok's own HTML
+```
+
+A pass-through would have returned **502**, because nothing was listening on 8000. Instead ngrok
+answered it. Google's OAuth redirect is exactly this shape — a browser GET with an HTML Accept —
+so **the callback lands on ngrok's warning page, not on the backend**. The user must click
+through to continue. The documented bypass is an `ngrok-skip-browser-warning` header, which you
+cannot set on a redirect Google issues.
+
+It does not hard-break sign-in: clicking through still reaches the callback, which still 302s to
+`nudj://`. But a warning page in the middle of sign-in is not shippable, and it cannot be
+engineered away on the free tier.
+
+Second, smaller reason: the tunnel exists only while the laptop is awake and the agent is running.
 
 :::note These are M6 compliance work, listed here on purpose
 M1 is built knowing about them; M1 does not fix them. The single exception is the redirect URI,
@@ -193,22 +217,36 @@ and nowhere else — not in a commit, not in `app.config.ts`, not pasted into a 
 
 ### Task 0 — Give the backend a stable address
 
-M1 cannot run on a rotating hostname: Google matches `redirect_uri` exactly, and the app ships
-`EXPO_PUBLIC_API_URL` baked into the build.
+The hostname is already stable (finding 4), so this is **not** about the URL changing. It is about
+ngrok's free-tier interstitial intercepting the OAuth callback, and about the backend only
+existing while your laptop is awake.
 
 Pick one:
 
-- **Deploy** to Railway / Render / Fly — the free tier covers this comfortably.
-- **Reserved ngrok domain**, about $10/mo, keeps the tunnel and fixes the hostname.
+- **Deploy** to Railway / Render / Fly — the free tier covers this comfortably. No interstitial,
+  and the backend stays up when the laptop sleeps.
+- **A paid ngrok plan** (~$10/mo) — removes the interstitial on the domain you already have. Keeps
+  the laptop dependency.
 
-Recommended: deploy. The app needs a reachable backend regardless, and otherwise every M1 test run
-starts with tunnel admin.
+Recommended: deploy. The app needs a backend that is reachable when your laptop is shut, and the
+WhatsApp webhook does too.
+
+Whichever you pick, **re-test the callback the same way** before building on it:
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'User-Agent: Mozilla/5.0 … Chrome/141.0' -H 'Accept: text/html' \
+  https://<host>/oauth/callback
+```
+
+With the backend stopped that must return **502 or a connection error** — proof the request
+reaches your server rather than being answered by something in front of it.
 
 Then in Google Cloud → Clients → the **Web** client, set Authorized redirect URIs to
 `https://<host>/oauth/callback`, and update `GOOGLE_REDIRECT_URI` and `BASE_URL` to match.
 
-**Done when** `curl https://<host>/health` returns 200 twice, a day apart, with nothing restarted
-in between.
+**Done when** `curl https://<host>/health` returns 200 twice a day apart with nothing restarted in
+between, **and** the interstitial check above comes back clean.
 
 ---
 
